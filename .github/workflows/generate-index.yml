@@ -1,0 +1,103 @@
+name: Generate Image Index
+
+on:
+  push:
+    paths:
+      - 'images/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate-index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Generate Image Index
+        run: |
+          node << 'EOF'
+          const fs = require('fs');
+          const path = require('path');
+
+          function getAllImages(dir, baseDir = '') {
+            const images = [];
+            if (!fs.existsSync(dir)) return images;
+            
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+              const fullPath = path.join(dir, entry.name);
+              const relativePath = path.join(baseDir, entry.name);
+              
+              if (entry.isDirectory()) {
+                images.push(...getAllImages(fullPath, relativePath));
+              } else if (/\.(jpg|jpeg|png|gif|webp|svg)$/i.test(entry.name)) {
+                const stats = fs.statSync(fullPath);
+                images.push({
+                  name: entry.name,
+                  path: relativePath.replace(/\\/g, '/'),
+                  size: stats.size,
+                  updatedAt: stats.mtime.toISOString()
+                });
+              }
+            }
+            return images;
+          }
+
+          function groupByMonth(images) {
+            const groups = {};
+            for (const img of images) {
+              const date = new Date(img.updatedAt);
+              const key = `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}`;
+              if (!groups[key]) groups[key] = [];
+              groups[key].push(img);
+            }
+            return groups;
+          }
+
+          const imagesDir = './images';
+          const allImages = getAllImages(imagesDir);
+          const grouped = groupByMonth(allImages);
+
+          // Generate main index.json
+          const mainIndex = {
+            generatedAt: new Date().toISOString(),
+            total: allImages.length,
+            groups: Object.keys(grouped).sort().reverse(),
+            images: allImages
+          };
+          fs.writeFileSync('./images/index.json', JSON.stringify(mainIndex, null, 2));
+
+          // Generate monthly index files
+          for (const [month, imgs] of Object.entries(grouped)) {
+            const [year, mon] = month.split('/');
+            const dir = `./images/${year}/${mon}`;
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+            
+            const monthlyIndex = {
+              generatedAt: new Date().toISOString(),
+              month: month,
+              count: imgs.length,
+              images: imgs
+            };
+            fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify(monthlyIndex, null, 2));
+          }
+
+          console.log(`Generated index for ${allImages.length} images in ${Object.keys(grouped).length} months`);
+          EOF
+
+      - name: Commit and push index files
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add images/**/index.json images/index.json
+          git diff --staged --quiet || git commit -m "chore: auto-generate image index [skip ci]"
+          git push
